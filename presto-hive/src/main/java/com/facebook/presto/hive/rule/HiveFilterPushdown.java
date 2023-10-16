@@ -203,17 +203,22 @@ public class HiveFilterPushdown
         //  - range filters that apply to entire columns,
         //  - range filters that apply to subfields,
         //  - the rest. Intersect these with possibly pre-existing filters.
+        // 先提取出所有 Column 的 Domain，所有列都统一使用 Subfield 来进行表示
         DomainTranslator.ExtractionResult<Subfield> decomposedFilter = rowExpressionService.getDomainTranslator()
                 .fromPredicate(session, filter, new SubfieldExtractor(functionResolution, rowExpressionService.getExpressionOptimizer(), session).toColumnExtractor());
+        // 如果原来已经有现有的 Domain，先进行交集运算
+        // 有可能有之前的 RemainingExpression，需要进行优化
         if (currentLayoutHandle.isPresent()) {
             HiveTableLayoutHandle currentHiveLayout = (HiveTableLayoutHandle) currentLayoutHandle.get();
             decomposedFilter = intersectExtractionResult(new DomainTranslator.ExtractionResult(currentHiveLayout.getDomainPredicate(), currentHiveLayout.getRemainingPredicate()), decomposedFilter);
         }
 
+        // 如果不存在 Domain，则直接返回
         if (decomposedFilter.getTupleDomain().isNone()) {
             return new ConnectorPushdownFilterResult(EMPTY_TABLE_LAYOUT, FALSE_CONSTANT);
         }
 
+        // 有可能有之前的 RemainingExpression，需要进行优化
         RowExpression optimizedRemainingExpression = rowExpressionService.getExpressionOptimizer().optimize(decomposedFilter.getRemainingExpression(), OPTIMIZED, session);
         if (optimizedRemainingExpression instanceof ConstantExpression) {
             ConstantExpression constantExpression = (ConstantExpression) optimizedRemainingExpression;
@@ -222,9 +227,12 @@ public class HiveFilterPushdown
             }
         }
         Map<String, ColumnHandle> columnHandles = metadata.getColumnHandles(session, tableHandle);
+        // 所有非 subfield 的 Domain，包含分区列
         TupleDomain<ColumnHandle> entireColumnDomain = decomposedFilter.getTupleDomain()
                 .transform(subfield -> isEntireColumn(subfield) ? subfield.getRootName() : null)
                 .transform(columnHandles::get);
+
+        // 如果之前存在的话，和分区列的 Domain 进行相交
         if (currentLayoutHandle.isPresent()) {
             entireColumnDomain = entireColumnDomain.intersect(((HiveTableLayoutHandle) (currentLayoutHandle.get())).getPartitionColumnPredicate());
         }
@@ -243,6 +251,7 @@ public class HiveFilterPushdown
 
         HivePartitionResult hivePartitionResult = partitionManager.getPartitions(metastore, tableHandle, constraint, session);
 
+        // 不在分区列里面的 Domain +  非 EntireColumn 的 Domain
         TupleDomain<Subfield> domainPredicate = withColumnDomains(ImmutableMap.<Subfield, Domain>builder()
                 .putAll(hivePartitionResult.getUnenforcedConstraint()
                         .transform(HiveFilterPushdown::toSubfield)
@@ -253,17 +262,19 @@ public class HiveFilterPushdown
                         .getDomains()
                         .orElse(ImmutableMap.of()))
                 .build());
-
+        // column name to column handle Map for all columns in the table
+        // 用到的所有 Column 的信息，符合类型 就是这一列名称
         Set<String> predicateColumnNames = new HashSet<>();
         domainPredicate.getDomains().get().keySet().stream()
                 .map(Subfield::getRootName)
                 .forEach(predicateColumnNames::add);
         // Include only columns referenced in the optimized expression. Although the expression is sent to the worker node
         // unoptimized, the worker is expected to optimize the expression before executing.
+        // 从 RemainingExpression 中提取出所有的 VariableExpression，也就是用到的列信息
         extractVariableExpressions(optimizedRemainingExpression).stream()
                 .map(VariableReferenceExpression::getName)
                 .forEach(predicateColumnNames::add);
-
+        // 列名称 -> 列的 Handle
         Map<String, HiveColumnHandle> predicateColumns = predicateColumnNames.stream()
                 .map(columnHandles::get)
                 .map(HiveColumnHandle.class::cast)
@@ -273,6 +284,7 @@ public class HiveFilterPushdown
         SchemaTableName tableName = hiveTableHandle.getSchemaTableName();
 
         LogicalRowExpressions logicalRowExpressions = new LogicalRowExpressions(rowExpressionService.getDeterminismEvaluator(), functionResolution, functionMetadataManager);
+        // remain 的表达式中，所有的 DynamicFilter 不能推下去
         List<RowExpression> conjuncts = extractConjuncts(decomposedFilter.getRemainingExpression());
         ImmutableList.Builder<RowExpression> dynamicConjuncts = ImmutableList.builder();
         ImmutableList.Builder<RowExpression> staticConjuncts = ImmutableList.builder();
@@ -286,6 +298,8 @@ public class HiveFilterPushdown
         }
         RowExpression dynamicFilterExpression = logicalRowExpressions.combineConjuncts(dynamicConjuncts.build());
         RowExpression remainingExpression = logicalRowExpressions.combineConjuncts(staticConjuncts.build());
+        // 一个 RowExpression 中，如果在参数中用到了 DynamicFilter，那么这个 RowExpression 就不能推下去
+        // 不是 DynamicFilter
         remainingExpression = removeNestedDynamicFilters(remainingExpression);
 
         MetastoreContext context = new MetastoreContext(session.getIdentity(), session.getQueryId(), session.getClientInfo(), session.getSource(), getMetastoreHeaders(session), isUserDefinedTypeEncodingEnabled(session), metastore.getColumnConverterProvider());
@@ -312,6 +326,7 @@ public class HiveFilterPushdown
                                 .setPartitionColumns(hivePartitionResult.getPartitionColumns())
                                 .setDataColumns(pruneColumnComments(hivePartitionResult.getDataColumns()))
                                 .setTableParameters(hivePartitionResult.getTableParameters())
+                            // 不在分区列里面的 Domain +  非 EntireColumn 的 Domain
                                 .setDomainPredicate(domainPredicate)
                                 .setRemainingPredicate(remainingExpression)
                                 .setPredicateColumns(predicateColumns)
@@ -326,6 +341,7 @@ public class HiveFilterPushdown
                                 .setAppendRowNumberEnabled(appendRowNumbereEnabled)
                                 .setHiveTableHandle(hiveTableHandle)
                                 .build()),
+                // dynamicFilterExpression 不能推下去，因为要使用其做 Runtime filter
                 dynamicFilterExpression);
     }
 

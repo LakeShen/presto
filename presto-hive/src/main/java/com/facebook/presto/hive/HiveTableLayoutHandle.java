@@ -54,6 +54,7 @@ public class HiveTableLayoutHandle
     private final List<HiveColumnHandle> partitionColumns;
     private final List<Column> dataColumns;
     private final Map<String, String> tableParameters;
+    // 不是分区列的 Domain + 非 EntireColumn 的 Column Domain
     private final TupleDomain<Subfield> domainPredicate;
     private final RowExpression remainingPredicate;
     private final Map<String, HiveColumnHandle> predicateColumns;

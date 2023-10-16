@@ -260,9 +260,9 @@ public class HivePartitionManager
         TupleDomain<ColumnHandle> effectivePredicate = constraint.getSummary();
 
         Table table = getTable(session, metastore, hiveTableHandle, isOfflineDataDebugModeEnabled(session));
-
+        // 分区列
         List<HiveColumnHandle> partitionColumns = getPartitionKeyColumnHandles(table);
-
+        // 获取到所有的分区结合 constraint
         List<HivePartition> partitions = getPartitionsAsList(getPartitionsIterator(metastore, tableHandle, constraint, session).iterator());
 
         Optional<HiveBucketHandle> hiveBucketHandle = getBucketHandle(table, session, effectivePredicate);
@@ -275,6 +275,7 @@ public class HivePartitionManager
             bucketFilter = Optional.empty();
         }
 
+        // 如果分区约束为 none 则返回空
         if (effectivePredicate.isNone()) {
             return new HivePartitionResult(
                     partitionColumns,
@@ -304,7 +305,9 @@ public class HivePartitionManager
         }
 
         // All partition key domains will be fully evaluated, so we don't need to include those
+        // remain 是不在分区列里面的 domain
         TupleDomain<ColumnHandle> remainingTupleDomain = TupleDomain.withColumnDomains(Maps.filterKeys(effectivePredicate.getDomains().get(), not(Predicates.in(partitionColumns))));
+        // remain 是在分区列里面的 domain
         TupleDomain<ColumnHandle> enforcedTupleDomain = TupleDomain.withColumnDomains(Maps.filterKeys(effectivePredicate.getDomains().get(), Predicates.in(partitionColumns)));
         return new HivePartitionResult(
                 partitionColumns,
